@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from bleak import BleakClient
+from bleak.backends.device import BLEDevice
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
 from homeassistant.components import bluetooth
@@ -90,15 +92,57 @@ class UlanziK6500Light(LightEntity):
             response=True,
         )
 
+    def _ble_address_lookup_keys(self) -> tuple[str, ...]:
+        """Keys used in HA Bluetooth history (BlueZ often uses lowercase MAC)."""
+        formatted = dr.format_mac(self._mac)
+        raw = self._mac.strip()
+        return tuple(
+            dict.fromkeys(
+                (
+                    formatted.lower(),
+                    formatted.upper(),
+                    formatted,
+                    raw.lower(),
+                    raw.upper(),
+                    raw,
+                )
+            )
+        )
+
+    async def _async_resolve_ble_device(self) -> BLEDevice | None:
+        """Resolve BLEDevice from HA scanners; tolerate MAC letter case."""
+        hass = self.hass
+        keys = self._ble_address_lookup_keys()
+
+        def _lookup_now() -> BLEDevice | None:
+            for addr in keys:
+                if dev := bluetooth.async_ble_device_from_address(
+                    hass, addr, connectable=True
+                ):
+                    return dev
+            for addr in keys:
+                scanned = bluetooth.async_scanner_devices_by_address(
+                    hass, addr, connectable=True
+                )
+                if scanned:
+                    return scanned[0].ble_device
+            return None
+
+        if dev := _lookup_now():
+            return dev
+
+        bluetooth.async_rediscover_address(hass, keys[0])
+        await asyncio.sleep(1.5)
+        return _lookup_now()
+
     async def _send_command(self, payload: bytes) -> bool:
         """Connect briefly and write the GATT characteristic by handle."""
-        ble_device = bluetooth.async_ble_device_from_address(
-            self.hass, dr.format_mac(self._mac), connectable=True
-        )
+        ble_device = await self._async_resolve_ble_device()
         if ble_device is None:
             _LOGGER.warning(
-                "Device %s not in Home Assistant Bluetooth cache. "
-                "Power the lamp on, move it closer, and check Settings → Devices → Bluetooth.",
+                "Device %s not found by Home Assistant Bluetooth (tried several MAC spellings). "
+                "Turn the lamp on so it advertises, move it near the adapter, "
+                "and check Settings → Devices → Bluetooth.",
                 self._mac,
             )
             return False
