@@ -31,13 +31,17 @@ _LOGGER = logging.getLogger(__name__)
 
 # ── GATT handles ─────────────────────────────────────────────────────────────
 
-GATT_WRITE_HANDLE = 0x0010  # all outgoing commands go here
+# BlueZ exposes the write characteristic at handle 0x000f (UUID c304).
+# The official Windows app writes to handle 0x0010 because Windows and BlueZ
+# number characteristic value handles differently (Windows shows declaration+1,
+# BlueZ shows the value handle directly). Using UUID bypasses this discrepancy.
+GATT_WRITE_UUID  = "0000c304-0000-1000-8000-00805f9b34fb"  # write / write-without-response
 
-# Device sends state notifications here.
+# Notifications arrive on UUID c305 (BlueZ handle 0x0011, Windows Wireshark 0x0012).
 # Protocol: 55 aa 04 <cmd_lo> <cmd_hi> <len> <payload…> <checksum 2b>
 #   cmd 0x0006 (probe-1 ack): payload[1] = current brightness; 0 = off
 #   cmd 0x0001 (ON/OFF ack):  payload[1] = confirmed brightness; 0 = off
-GATT_NOTIFY_HANDLE = 0x0012
+GATT_NOTIFY_UUID = "0000c305-0000-1000-8000-00805f9b34fb"  # notify
 
 # Session-init handles written before commands (Wireshark frames 215–220).
 # Type (characteristic value vs CCCD descriptor) is resolved at runtime — see
@@ -204,20 +208,14 @@ class UlanziK6500Light(LightEntity):
         client: BleakClient,
         callback: Callable[[int, bytes], None],
     ) -> None:
-        """Subscribe to incoming notifications from GATT_NOTIFY_HANDLE (0x0012)."""
-        for svc in client.services:
-            for char in svc.characteristics:
-                if char.handle == GATT_NOTIFY_HANDLE:
-                    try:
-                        await client.start_notify(char, callback)
-                        _LOGGER.debug("Subscribed to 0x%04x for %s", GATT_NOTIFY_HANDLE, self._mac)
-                    except Exception:
-                        _LOGGER.debug(
-                            "start_notify 0x%04x failed for %s",
-                            GATT_NOTIFY_HANDLE, self._mac, exc_info=True,
-                        )
-                    return
-        _LOGGER.debug("Notify handle 0x%04x not in service map for %s", GATT_NOTIFY_HANDLE, self._mac)
+        """Subscribe to incoming notifications from GATT_NOTIFY_UUID (c305)."""
+        try:
+            await client.start_notify(GATT_NOTIFY_UUID, callback)
+            _LOGGER.debug("Subscribed to %s for %s", GATT_NOTIFY_UUID, self._mac)
+        except Exception:
+            _LOGGER.debug(
+                "start_notify %s failed for %s", GATT_NOTIFY_UUID, self._mac, exc_info=True
+            )
 
     async def _gatt_session_init(self, client: BleakClient) -> None:
         """Mirror the official app: init writes → prep reads."""
@@ -314,9 +312,7 @@ class UlanziK6500Light(LightEntity):
             client = await self._async_establish_client(ble_device)
             await self._subscribe_notify_handle(client, _on_notify)
             await self._gatt_session_init(client)
-            await self._write_handle_att(
-                client, GATT_WRITE_HANDLE, COMMAND_LINK_PROBE_1, response=False
-            )
+            await client.write_gatt_char(GATT_WRITE_UUID, COMMAND_LINK_PROBE_1, response=False)
             try:
                 await asyncio.wait_for(event.wait(), timeout=NOTIFY_TIMEOUT)
             except asyncio.TimeoutError:
@@ -363,8 +359,8 @@ class UlanziK6500Light(LightEntity):
             await self._subscribe_notify_handle(client, _on_notify)
             await self._gatt_session_init(client)
             for probe in (COMMAND_LINK_PROBE_1, COMMAND_LINK_PROBE_2):
-                await self._write_handle_att(client, GATT_WRITE_HANDLE, probe, response=False)
-            await self._write_handle_att(client, GATT_WRITE_HANDLE, payload, response=False)
+                await client.write_gatt_char(GATT_WRITE_UUID, probe, response=False)
+            await client.write_gatt_char(GATT_WRITE_UUID, payload, response=False)
             try:
                 await asyncio.wait_for(event.wait(), timeout=NOTIFY_TIMEOUT)
             except asyncio.TimeoutError:
