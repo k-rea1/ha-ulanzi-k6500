@@ -26,11 +26,11 @@ GATT_WRITE_HANDLE = 0x0010
 
 # Session init (official app, Wireshark): Write Request before commands on 0x0010.
 # 0x0009 Value 02 00 = CCCD indications (frame 87 — подтверждено).
-# 0x000b — frame 92; в экспорте не было Value; типичная пара к indications — 01 00 (notify).
+# 0x000b Value 01 — frame 92 (Wireshark; один байт, не CCCD 01 00).
 GATT_INIT_HANDLE_INDICATE = 0x0009
 GATT_INIT_PAYLOAD_INDICATE = bytes.fromhex("0200")
 GATT_INIT_HANDLE_NOTIFY = 0x000B
-GATT_INIT_PAYLOAD_NOTIFY = bytes.fromhex("0100")
+GATT_INIT_PAYLOAD_NOTIFY = bytes.fromhex("01")
 
 COMMAND_ON = bytes.fromhex("55 aa 03 01 00 05 01 28 19 64 00 10 fe")
 COMMAND_OFF = bytes.fromhex("55 aa 03 01 00 05 01 00 19 64 00 19 5e")
