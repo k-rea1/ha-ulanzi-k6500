@@ -29,7 +29,12 @@ The same MAC cannot be added twice.
 
 ## Behaviour
 
-The integration uses short BLE connections and **optimistic** state: after a successful write, Home Assistant assumes the command reached the lamp. The device does not report state back over this protocol.
+The integration opens a BLE connection for each command, then disconnects. State is **optimistic** (no read-back from the lamp).
+
+## Troubleshooting
+
+- **Timeout / no reaction:** Home Assistant must already “see” the lamp via its Bluetooth stack. Use **Settings → Devices & services → Bluetooth** and confirm the device is listed or has been seen recently. The integration uses the HA scanner cache (`async_ble_device_from_address`); if the MAC is wrong or the lamp is off / out of range, connection will time out.
+- **Do not use raw `BleakClient(MAC)` on HA OS:** That can fight the global scanner and cause BlueZ timeouts; this integration uses `bleak-retry-connector` and a `BLEDevice` from the Bluetooth integration instead.
 
 ## Before publishing
 

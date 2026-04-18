@@ -6,7 +6,9 @@ import logging
 from typing import Any
 
 from bleak import BleakClient
+from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
 
+from homeassistant.components import bluetooth
 from homeassistant.components.light import ColorMode, LightEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_MAC, CONF_NAME
@@ -25,8 +27,8 @@ GATT_WRITE_HANDLE = 0x0010
 COMMAND_ON = bytes.fromhex("55 aa 03 01 00 05 01 28 19 64 00 10 fe")
 COMMAND_OFF = bytes.fromhex("55 aa 03 01 00 05 01 00 19 64 00 19 5e")
 
-# Short timeout so the Bluetooth adapter is not held for long.
-BLE_CONNECTION_TIMEOUT = 8.0
+# BlueZ often needs time for service discovery on first connect; HA recommends >= 10 s.
+BLE_CONNECT_TIMEOUT = 30.0
 
 
 async def async_setup_entry(
@@ -69,17 +71,45 @@ class UlanziK6500Light(LightEntity):
 
     async def _send_command(self, payload: bytes) -> bool:
         """Connect briefly and write the GATT characteristic by handle."""
-        client = BleakClient(self._mac, timeout=BLE_CONNECTION_TIMEOUT)
+        ble_device = bluetooth.async_ble_device_from_address(
+            self.hass, dr.format_mac(self._mac), connectable=True
+        )
+        if ble_device is None:
+            _LOGGER.warning(
+                "Device %s not in Home Assistant Bluetooth cache. "
+                "Power the lamp on, move it closer, and check Settings → Devices → Bluetooth.",
+                self._mac,
+            )
+            return False
+
+        client: BleakClient | None = None
         try:
-            async with client:
-                await client.write_gatt_char(
-                    GATT_WRITE_HANDLE, payload, response=False
-                )
+            client = await establish_connection(
+                BleakClientWithServiceCache,
+                ble_device,
+                name=self.name or self._mac,
+                max_attempts=4,
+                timeout=BLE_CONNECT_TIMEOUT,
+            )
+            await client.write_gatt_char(
+                GATT_WRITE_HANDLE, payload, response=False
+            )
         except Exception:
             _LOGGER.exception(
                 "BLE error while writing to Ulanzi K6500 at %s", self._mac
             )
             return False
+        finally:
+            if client is not None and client.is_connected:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    _LOGGER.debug(
+                        "Disconnect after write raised for %s (ignored)",
+                        self._mac,
+                        exc_info=True,
+                    )
+
         return True
 
     async def async_turn_on(self, **kwargs: Any) -> None:
