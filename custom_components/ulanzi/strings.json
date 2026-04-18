@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Ulanzi K6500",
+        "description": "Enter the Bluetooth MAC address of your monitor light (from your OS or a BLE scanner).",
+        "data": {
+          "mac": "MAC address",
+          "name": "Name"
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "Invalid MAC address. Use format like AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF."
+    },
+    "abort": {
+      "already_configured": "This MAC address is already configured."
+    }
+  },
+  "title": "Ulanzi K6500 BLE Light"
+}
