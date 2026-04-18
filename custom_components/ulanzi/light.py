@@ -131,6 +131,8 @@ class UlanziK6500Light(LightEntity):
         self._connect_lock = asyncio.Lock()
         self._cmd_lock = asyncio.Lock()
         self._keepalive_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
+        self._removed = False
         self._cancel_ble_callback: Callable[[], None] | None = None
 
         # Pending notification waiter: (cmd_filter, event, result_holder)
@@ -157,6 +159,10 @@ class UlanziK6500Light(LightEntity):
         self.hass.async_create_task(self._async_try_connect())
 
     async def async_will_remove_from_hass(self) -> None:
+        self._removed = True
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
+            self._reconnect_task = None
         await super().async_will_remove_from_hass()
         if self._cancel_ble_callback:
             self._cancel_ble_callback()
@@ -215,12 +221,33 @@ class UlanziK6500Light(LightEntity):
 
     def _on_disconnected(self, _client: BleakClient) -> None:
         """Called by bleak when the device drops the connection."""
-        _LOGGER.debug("Disconnected from %s", self._mac)
+        _LOGGER.debug("Disconnected from %s — scheduling reconnect loop", self._mac)
         self._client = None
         if self._keepalive_task:
             self._keepalive_task.cancel()
             self._keepalive_task = None
         # Keep last known state — better than resetting to unknown.
+        if self._removed:
+            return
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+        self._reconnect_task = self.hass.async_create_task(self._reconnect_loop())
+
+    async def _reconnect_loop(self) -> None:
+        """Keep retrying until reconnected, regardless of advertisement callbacks."""
+        try:
+            delay = 5.0
+            while not self._is_connected() and not self._removed:
+                await asyncio.sleep(delay)
+                if self._is_connected() or self._removed:
+                    return
+                _LOGGER.debug("Reconnect attempt for %s", self._mac)
+                await self._async_try_connect()
+                delay = min(delay * 1.5, 60.0)  # back off up to 60 s
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._reconnect_task = None
 
     async def _async_disconnect(self) -> None:
         if self._keepalive_task:
@@ -362,7 +389,7 @@ class UlanziK6500Light(LightEntity):
                     BleakClientWithServiceCache,
                     ble_device,
                     name=self.name or self._mac,
-                    max_attempts=1,
+                    max_attempts=3,
                     timeout=BLE_CONNECT_TIMEOUT,
                     use_services_cache=True,
                 )
