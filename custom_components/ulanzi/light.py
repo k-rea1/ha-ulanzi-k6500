@@ -52,6 +52,21 @@ COMMAND_OFF = bytes.fromhex("55 aa 03 01 00 05 01 00 19 64 00 19 5e")
 # BlueZ often needs time for service discovery on first connect; HA recommends >= 10 s.
 BLE_CONNECT_TIMEOUT = 30.0
 
+# Brief pause before connect + retries when BlueZ reports Error.InProgress (adapter busy).
+BLE_PRE_CONNECT_DELAY = 0.4
+BLE_IN_PROGRESS_RETRIES = 4
+BLE_IN_PROGRESS_BACKOFF_BASE = 1.0
+
+
+def _exception_chain_text(exc: BaseException) -> str:
+    """Concatenate exception and __cause__ messages for substring checks."""
+    parts: list[str] = []
+    current: BaseException | None = exc
+    while current is not None:
+        parts.append(str(current))
+        current = current.__cause__
+    return " ".join(parts).lower()
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -182,6 +197,38 @@ class UlanziK6500Light(LightEntity):
         await asyncio.sleep(1.5)
         return _lookup_now()
 
+    async def _async_establish_client(self, ble_device: BLEDevice) -> BleakClient:
+        """Connect with cushion for BlueZ ``Error.InProgress`` (operation already running)."""
+        await asyncio.sleep(BLE_PRE_CONNECT_DELAY)
+        for attempt in range(BLE_IN_PROGRESS_RETRIES):
+            try:
+                return await establish_connection(
+                    BleakClientWithServiceCache,
+                    ble_device,
+                    name=self.name or self._mac,
+                    max_attempts=2,
+                    timeout=BLE_CONNECT_TIMEOUT,
+                    use_services_cache=False,
+                )
+            except BleakOutOfConnectionSlotsError:
+                raise
+            except Exception as exc:
+                text = _exception_chain_text(exc)
+                if "in progress" in text or "error.inprogress" in text.replace(" ", ""):
+                    _LOGGER.debug(
+                        "BLE connect InProgress for %s (outer attempt %s/%s), backing off",
+                        self._mac,
+                        attempt + 1,
+                        BLE_IN_PROGRESS_RETRIES,
+                    )
+                    if attempt + 1 >= BLE_IN_PROGRESS_RETRIES:
+                        raise
+                    await asyncio.sleep(
+                        BLE_IN_PROGRESS_BACKOFF_BASE + 0.85 * attempt
+                    )
+                    continue
+                raise
+
     async def _send_command(self, payload: bytes) -> bool:
         """Connect briefly and write the GATT characteristic by handle."""
         ble_device = await self._async_resolve_ble_device()
@@ -196,14 +243,7 @@ class UlanziK6500Light(LightEntity):
 
         client: BleakClient | None = None
         try:
-            client = await establish_connection(
-                BleakClientWithServiceCache,
-                ble_device,
-                name=self.name or self._mac,
-                max_attempts=3,
-                timeout=BLE_CONNECT_TIMEOUT,
-                use_services_cache=False,
-            )
+            client = await self._async_establish_client(ble_device)
             await self._gatt_session_init(client)
             for probe in (COMMAND_LINK_PROBE_1, COMMAND_LINK_PROBE_2):
                 await self._write_handle_att(
