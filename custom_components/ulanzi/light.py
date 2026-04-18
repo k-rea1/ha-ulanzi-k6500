@@ -34,6 +34,9 @@ GATT_INIT_PAYLOAD_INDICATE = bytes.fromhex("0200")
 GATT_INIT_HANDLE_NOTIFY = 0x000B
 GATT_INIT_PAYLOAD_NOTIFY = bytes.fromhex("01")
 
+# Official app reads these handles before Write Command on 0x0010 (Wireshark ~13.07–13.55 s).
+GATT_PREP_READ_HANDLES: tuple[int, ...] = (0x0005, 0x0003, 0x0013)
+
 COMMAND_ON = bytes.fromhex("55 aa 03 01 00 05 01 28 19 64 00 10 fe")
 COMMAND_OFF = bytes.fromhex("55 aa 03 01 00 05 01 00 19 64 00 19 5e")
 
@@ -80,7 +83,7 @@ class UlanziK6500Light(LightEntity):
         return self._state
 
     async def _gatt_session_init(self, client: BleakClient) -> None:
-        """Mirror app: enable CCCD via Write Request (response=True) before 0x0010."""
+        """Mirror app: init writes, prep reads, then caller writes to 0x0010."""
         await client.write_gatt_char(
             GATT_INIT_HANDLE_INDICATE,
             GATT_INIT_PAYLOAD_INDICATE,
@@ -91,6 +94,16 @@ class UlanziK6500Light(LightEntity):
             GATT_INIT_PAYLOAD_NOTIFY,
             response=True,
         )
+        for handle in GATT_PREP_READ_HANDLES:
+            try:
+                await client.read_gatt_char(handle)
+            except Exception:
+                _LOGGER.debug(
+                    "Prep read handle 0x%04x failed for %s (continuing)",
+                    handle,
+                    self._mac,
+                    exc_info=True,
+                )
 
     def _ble_address_lookup_keys(self) -> tuple[str, ...]:
         """Keys used in HA Bluetooth history (BlueZ often uses lowercase MAC)."""
