@@ -8,7 +8,12 @@ from typing import Any
 
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
-from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
+from bleak.exc import BleakCharacteristicNotFoundError
+from bleak_retry_connector import (
+    BleakClientWithServiceCache,
+    BleakOutOfConnectionSlotsError,
+    establish_connection,
+)
 
 from homeassistant.components import bluetooth
 from homeassistant.components.light import ColorMode, LightEntity
@@ -86,28 +91,53 @@ class UlanziK6500Light(LightEntity):
         """Return true if light is on."""
         return self._state
 
+    async def _write_handle_att(
+        self, client: BleakClient, handle: int, data: bytes, *, response: bool
+    ) -> None:
+        """Write by attribute handle: characteristic, else descriptor (Wireshark uses raw handles)."""
+        try:
+            await client.write_gatt_char(handle, data, response=response)
+        except BleakCharacteristicNotFoundError:
+            await client.write_gatt_descriptor(handle, data)
+
+    async def _read_handle_optional(self, client: BleakClient, handle: int) -> None:
+        """Read by handle (characteristic or descriptor); ignore failures."""
+        try:
+            await client.read_gatt_char(handle)
+        except BleakCharacteristicNotFoundError:
+            try:
+                await client.read_gatt_descriptor(handle)
+            except Exception:
+                _LOGGER.debug(
+                    "Prep read descriptor 0x%04x failed for %s (continuing)",
+                    handle,
+                    self._mac,
+                    exc_info=True,
+                )
+        except Exception:
+            _LOGGER.debug(
+                "Prep read handle 0x%04x failed for %s (continuing)",
+                handle,
+                self._mac,
+                exc_info=True,
+            )
+
     async def _gatt_session_init(self, client: BleakClient) -> None:
         """Mirror app: init writes, prep reads, then caller writes to 0x0010."""
-        await client.write_gatt_char(
+        await self._write_handle_att(
+            client,
             GATT_INIT_HANDLE_INDICATE,
             GATT_INIT_PAYLOAD_INDICATE,
             response=True,
         )
-        await client.write_gatt_char(
+        await self._write_handle_att(
+            client,
             GATT_INIT_HANDLE_NOTIFY,
             GATT_INIT_PAYLOAD_NOTIFY,
             response=True,
         )
         for handle in GATT_PREP_READ_HANDLES:
-            try:
-                await client.read_gatt_char(handle)
-            except Exception:
-                _LOGGER.debug(
-                    "Prep read handle 0x%04x failed for %s (continuing)",
-                    handle,
-                    self._mac,
-                    exc_info=True,
-                )
+            await self._read_handle_optional(client, handle)
 
     def _ble_address_lookup_keys(self) -> tuple[str, ...]:
         """Keys used in HA Bluetooth history (BlueZ often uses lowercase MAC)."""
@@ -170,17 +200,26 @@ class UlanziK6500Light(LightEntity):
                 BleakClientWithServiceCache,
                 ble_device,
                 name=self.name or self._mac,
-                max_attempts=4,
+                max_attempts=3,
                 timeout=BLE_CONNECT_TIMEOUT,
+                use_services_cache=False,
             )
             await self._gatt_session_init(client)
             for probe in (COMMAND_LINK_PROBE_1, COMMAND_LINK_PROBE_2):
-                await client.write_gatt_char(
-                    GATT_WRITE_HANDLE, probe, response=False
+                await self._write_handle_att(
+                    client, GATT_WRITE_HANDLE, probe, response=False
                 )
-            await client.write_gatt_char(
-                GATT_WRITE_HANDLE, payload, response=False
+            await self._write_handle_att(
+                client, GATT_WRITE_HANDLE, payload, response=False
             )
+        except BleakOutOfConnectionSlotsError:
+            _LOGGER.error(
+                "Bluetooth: no free connection slot to reach %s "
+                "(ESPHome proxy / adapter limit). "
+                "Close other BLE connections or add a proxy near the lamp.",
+                self._mac,
+            )
+            return False
         except Exception:
             _LOGGER.exception(
                 "BLE error while writing to Ulanzi K6500 at %s", self._mac
