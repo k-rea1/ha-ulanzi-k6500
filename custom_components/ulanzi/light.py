@@ -156,7 +156,7 @@ class UlanziK6500Light(LightEntity):
             bluetooth.BluetoothScanningMode.ACTIVE,
         )
         # Connect immediately if device already known to scanner.
-        self.hass.async_create_task(self._async_try_connect())
+        self.hass.async_create_background_task(self._async_try_connect(), "ulanzi_connect")
 
     async def async_will_remove_from_hass(self) -> None:
         self._removed = True
@@ -178,7 +178,7 @@ class UlanziK6500Light(LightEntity):
     ) -> None:
         """Fired by HA scanner when K6500 broadcasts. Trigger connect if needed."""
         if not self._is_connected() and not self._connect_lock.locked():
-            self.hass.async_create_task(self._async_try_connect())
+            self.hass.async_create_background_task(self._async_try_connect(), "ulanzi_connect")
 
     # ── Connection management ─────────────────────────────────────────────────
 
@@ -210,7 +210,7 @@ class UlanziK6500Light(LightEntity):
             # Read initial state.
             await self._do_probe()
             # Keep link alive with periodic probes.
-            self._keepalive_task = self.hass.async_create_task(self._keepalive_loop())
+            self._keepalive_task = self.hass.async_create_background_task(self._keepalive_loop(), "ulanzi_keepalive")
         except Exception:
             _LOGGER.debug("Connect to %s failed", self._mac, exc_info=True)
             if client is not None:
@@ -231,7 +231,7 @@ class UlanziK6500Light(LightEntity):
             return
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
-        self._reconnect_task = self.hass.async_create_task(self._reconnect_loop())
+        self._reconnect_task = self.hass.async_create_background_task(self._reconnect_loop(), "ulanzi_reconnect")
 
     async def _reconnect_loop(self) -> None:
         """Keep retrying until reconnected, regardless of advertisement callbacks."""
