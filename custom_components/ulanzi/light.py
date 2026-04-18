@@ -37,8 +37,9 @@ GATT_INIT_PAYLOAD_NOTIFY = bytes.fromhex("01")
 # Official app reads these handles before Write Command on 0x0010 (Wireshark ~13.07–13.55 s).
 GATT_PREP_READ_HANDLES: tuple[int, ...] = (0x0005, 0x0003, 0x0013)
 
-# First Write Command on 0x0010 after prep reads (Wireshark frame 235) — not ON/OFF (9 bytes).
-COMMAND_LINK_PROBE = bytes.fromhex("55 aa 03 06 00 01 01 a0 d8")
+# Write Command on 0x0010 after prep reads (Wireshark) — not ON/OFF (9 bytes each).
+COMMAND_LINK_PROBE_1 = bytes.fromhex("55 aa 03 06 00 01 01 a0 d8")  # frame 235
+COMMAND_LINK_PROBE_2 = bytes.fromhex("55 aa 03 21 00 01 01 aa 6c")  # frame 239
 
 COMMAND_ON = bytes.fromhex("55 aa 03 01 00 05 01 28 19 64 00 10 fe")
 COMMAND_OFF = bytes.fromhex("55 aa 03 01 00 05 01 00 19 64 00 19 5e")
@@ -173,9 +174,10 @@ class UlanziK6500Light(LightEntity):
                 timeout=BLE_CONNECT_TIMEOUT,
             )
             await self._gatt_session_init(client)
-            await client.write_gatt_char(
-                GATT_WRITE_HANDLE, COMMAND_LINK_PROBE, response=False
-            )
+            for probe in (COMMAND_LINK_PROBE_1, COMMAND_LINK_PROBE_2):
+                await client.write_gatt_char(
+                    GATT_WRITE_HANDLE, probe, response=False
+                )
             await client.write_gatt_char(
                 GATT_WRITE_HANDLE, payload, response=False
             )
