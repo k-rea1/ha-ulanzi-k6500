@@ -52,7 +52,9 @@ GATT_INIT_HANDLE_NOTIFY = 0x000B
 GATT_INIT_PAYLOAD_NOTIFY = bytes.fromhex("01")
 
 # Reads performed by the official app before the first write (Wireshark).
-GATT_PREP_READ_HANDLES: tuple[int, ...] = (0x0005, 0x0003, 0x0013)
+# 0x0005 and 0x0003 are declaration handles not exposed by BlueZ — skipped.
+# 0x0013 is the CCCD for c305 and IS in the service map — keep it.
+GATT_PREP_READ_HANDLES: tuple[int, ...] = (0x0013,)
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
@@ -71,6 +73,11 @@ BLE_PRE_CONNECT_DELAY      = 0.4    # BlueZ prep pause
 BLE_IN_PROGRESS_RETRIES    = 4
 BLE_IN_PROGRESS_BACKOFF_BASE = 1.0
 NOTIFY_TIMEOUT             = 3.0    # wait for device ack after command
+
+# On VM + USB-passthrough setups the physical adapter releases HCI slots slower
+# than BlueZ reports. Retry a few times before giving up.
+BLE_NO_SLOT_RETRIES        = 3
+BLE_NO_SLOT_BACKOFF        = 3.0    # seconds between retries
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -264,6 +271,19 @@ class UlanziK6500Light(LightEntity):
 
     async def _async_establish_client(self, ble_device: BLEDevice) -> BleakClient:
         await asyncio.sleep(BLE_PRE_CONNECT_DELAY)
+        for slot_attempt in range(BLE_NO_SLOT_RETRIES):
+            try:
+                return await self._async_connect_inner(ble_device)
+            except BleakOutOfConnectionSlotsError:
+                if slot_attempt + 1 >= BLE_NO_SLOT_RETRIES:
+                    raise
+                _LOGGER.debug(
+                    "No BLE slot for %s (attempt %s/%s), waiting %.1f s for adapter to free up",
+                    self._mac, slot_attempt + 1, BLE_NO_SLOT_RETRIES, BLE_NO_SLOT_BACKOFF,
+                )
+                await asyncio.sleep(BLE_NO_SLOT_BACKOFF)
+
+    async def _async_connect_inner(self, ble_device: BLEDevice) -> BleakClient:
         for attempt in range(BLE_IN_PROGRESS_RETRIES):
             try:
                 return await establish_connection(
@@ -272,7 +292,7 @@ class UlanziK6500Light(LightEntity):
                     name=self.name or self._mac,
                     max_attempts=2,
                     timeout=BLE_CONNECT_TIMEOUT,
-                    use_services_cache=False,
+                    use_services_cache=True,
                 )
             except BleakOutOfConnectionSlotsError:
                 raise
