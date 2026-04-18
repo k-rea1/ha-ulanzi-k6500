@@ -2,11 +2,11 @@
   "domain": "ulanzi",
   "name": "Ulanzi K6500 BLE Light",
   "config_flow": true,
-  "dependencies": ["bluetooth_adapters"],
+  "dependencies": ["bluetooth"],
   "documentation": "https://github.com/k-rea1/ha-ulanzi-k6500",
   "integration_type": "device",
-  "iot_class": "local_polling",
+  "iot_class": "assumed_state",
   "issue_tracker": "https://github.com/k-rea1/ha-ulanzi-k6500/issues",
   "requirements": ["bleak>=0.21.1", "bleak-retry-connector>=3.4.0"],
-  "version": "1.0.9"
+  "version": "1.1.0"
 }

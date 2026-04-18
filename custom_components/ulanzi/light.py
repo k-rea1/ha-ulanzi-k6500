@@ -31,11 +31,14 @@ _LOGGER = logging.getLogger(__name__)
 # GATT write handle (reverse-engineered for K6500).
 GATT_WRITE_HANDLE = 0x0010
 
-# Session init (official app, Wireshark): Write Request before commands on 0x0010.
-# 0x0009 Value 02 00 = CCCD indications (frame 87 — подтверждено).
-# 0x000b Value 01 — frame 92 (Wireshark; один байт, не CCCD 01 00).
-GATT_INIT_HANDLE_INDICATE = 0x0009
-GATT_INIT_PAYLOAD_INDICATE = bytes.fromhex("0200")
+# Session init (official app, Wireshark frames 215–220):
+# 0x0009 is a CCCD descriptor (indications) — BlueZ blocks direct descriptor writes
+# with org.bluez.Error.NotPermitted; subscribe via start_notify on the parent
+# characteristic value at 0x0008 instead.
+GATT_CHAR_HANDLE_INDICATE = 0x0008   # parent char of CCCD at 0x0009
+
+# 0x000b: Write Request with 1-byte payload 0x01 (frame 218). This handle is a
+# writable characteristic value (not a CCCD), so write_gatt_char works directly.
 GATT_INIT_HANDLE_NOTIFY = 0x000B
 GATT_INIT_PAYLOAD_NOTIFY = bytes.fromhex("01")
 
@@ -139,12 +142,9 @@ class UlanziK6500Light(LightEntity):
 
     async def _gatt_session_init(self, client: BleakClient) -> None:
         """Mirror app: init writes, prep reads, then caller writes to 0x0010."""
-        await self._write_handle_att(
-            client,
-            GATT_INIT_HANDLE_INDICATE,
-            GATT_INIT_PAYLOAD_INDICATE,
-            response=True,
-        )
+        # BlueZ blocks write_gatt_descriptor on CCCDs with NotPermitted.
+        # Use start_notify so BlueZ writes the CCCD internally via D-Bus StartNotify.
+        await client.start_notify(GATT_CHAR_HANDLE_INDICATE, lambda _h, _d: None)
         await self._write_handle_att(
             client,
             GATT_INIT_HANDLE_NOTIFY,
@@ -208,7 +208,6 @@ class UlanziK6500Light(LightEntity):
                     name=self.name or self._mac,
                     max_attempts=2,
                     timeout=BLE_CONNECT_TIMEOUT,
-                    use_services_cache=False,
                 )
             except BleakOutOfConnectionSlotsError:
                 raise
@@ -266,7 +265,7 @@ class UlanziK6500Light(LightEntity):
             )
             return False
         finally:
-            if client is not None and client.is_connected:
+            if client is not None:
                 try:
                     await client.disconnect()
                 except Exception:
