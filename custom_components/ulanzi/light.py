@@ -24,6 +24,14 @@ _LOGGER = logging.getLogger(__name__)
 # GATT write handle (reverse-engineered for K6500).
 GATT_WRITE_HANDLE = 0x0010
 
+# Session init (official app, Wireshark): Write Request before commands on 0x0010.
+# 0x0009 Value 02 00 = CCCD indications (frame 87 — подтверждено).
+# 0x000b — frame 92; в экспорте не было Value; типичная пара к indications — 01 00 (notify).
+GATT_INIT_HANDLE_INDICATE = 0x0009
+GATT_INIT_PAYLOAD_INDICATE = bytes.fromhex("0200")
+GATT_INIT_HANDLE_NOTIFY = 0x000B
+GATT_INIT_PAYLOAD_NOTIFY = bytes.fromhex("0100")
+
 COMMAND_ON = bytes.fromhex("55 aa 03 01 00 05 01 28 19 64 00 10 fe")
 COMMAND_OFF = bytes.fromhex("55 aa 03 01 00 05 01 00 19 64 00 19 5e")
 
@@ -69,6 +77,19 @@ class UlanziK6500Light(LightEntity):
         """Return true if light is on."""
         return self._state
 
+    async def _gatt_session_init(self, client: BleakClient) -> None:
+        """Mirror app: enable CCCD via Write Request (response=True) before 0x0010."""
+        await client.write_gatt_char(
+            GATT_INIT_HANDLE_INDICATE,
+            GATT_INIT_PAYLOAD_INDICATE,
+            response=True,
+        )
+        await client.write_gatt_char(
+            GATT_INIT_HANDLE_NOTIFY,
+            GATT_INIT_PAYLOAD_NOTIFY,
+            response=True,
+        )
+
     async def _send_command(self, payload: bytes) -> bool:
         """Connect briefly and write the GATT characteristic by handle."""
         ble_device = bluetooth.async_ble_device_from_address(
@@ -91,6 +112,7 @@ class UlanziK6500Light(LightEntity):
                 max_attempts=4,
                 timeout=BLE_CONNECT_TIMEOUT,
             )
+            await self._gatt_session_init(client)
             await client.write_gatt_char(
                 GATT_WRITE_HANDLE, payload, response=False
             )
