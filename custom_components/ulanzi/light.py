@@ -110,41 +110,28 @@ def _build_command(cmd: int, payload: bytes) -> bytes:
     return b"\x55\xaa" + body + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
 
 
-def _kelvin_to_warm_cool(kelvin: int) -> tuple[int, int]:
-    """Convert color temperature to warm/cool LED mix (each 0-100, sum = 100)."""
-    t = max(0.0, min(1.0, (kelvin - MIN_COLOR_TEMP_K) / (MAX_COLOR_TEMP_K - MIN_COLOR_TEMP_K)))
-    warm = round((1.0 - t) * 100)
-    return warm, 100 - warm
-
-
-def _warm_cool_to_kelvin(warm: int, cool: int) -> int:
-    """Reverse of _kelvin_to_warm_cool."""
-    total = warm + cool
-    if total == 0:
-        return DEFAULT_COLOR_TEMP_K
-    t = cool / total
-    return round(MIN_COLOR_TEMP_K + t * (MAX_COLOR_TEMP_K - MIN_COLOR_TEMP_K))
-
-
-def _parse_notification(data: bytes) -> tuple[int, int | None, int | None, int | None]:
+def _parse_notification(data: bytes) -> tuple[int, int | None, int | None]:
     """Decode a notification frame.
 
-    Returns (cmd, brightness_pct, warm_pct, cool_pct).
-    Values are None when not present / not an ON/OFF command.
-    brightness_pct > 0 means ON; 0 means OFF.
+    Returns (cmd, brightness_pct, kelvin).
+    - brightness_pct: 0-100 (0 = off), None if packet is not an ON/OFF ack.
+    - kelvin: color temperature in Kelvin from payload[2:3] big-endian, or None.
     """
     if len(data) < 8 or data[0] != 0x55 or data[1] != 0xAA or data[2] != 0x04:
-        return 0, None, None, None
+        return 0, None, None
     cmd = data[3] | (data[4] << 8)
     payload_len = data[5]
     if cmd not in (0x0001, 0x0006):
-        return cmd, None, None, None
+        return cmd, None, None
     if len(data) < 6 + payload_len + 2 or payload_len < 2:
-        return cmd, None, None, None
-    brightness = min(data[7], 100)          # payload[1]; clamp 0xFF → 100
-    warm = data[8] if payload_len >= 3 else None
-    cool = data[9] if payload_len >= 4 else None
-    return cmd, brightness, warm, cool
+        return cmd, None, None
+    brightness = min(data[7], 100)   # payload[1]; clamp 0xFF → 100
+    kelvin: int | None = None
+    if payload_len >= 4:
+        kelvin = (data[8] << 8) | data[9]   # payload[2:3] big-endian = Kelvin
+        if not (MIN_COLOR_TEMP_K <= kelvin <= MAX_COLOR_TEMP_K):
+            kelvin = None
+    return cmd, brightness, kelvin
 
 
 # ── Platform setup ────────────────────────────────────────────────────────────
@@ -345,13 +332,13 @@ class UlanziK6500Light(LightEntity):
     # ── Notification handler ──────────────────────────────────────────────────
 
     def _on_notify_persistent(self, handle: int, data: bytes) -> None:
-        cmd, brightness, warm, cool = _parse_notification(data)
+        cmd, brightness, kelvin = _parse_notification(data)
         if brightness is not None:
             self._state = brightness > 0
-            if self._state:
-                self._brightness_pct = brightness if brightness > 0 else self._brightness_pct
-            if warm is not None and cool is not None:
-                self._color_temp_kelvin = _warm_cool_to_kelvin(warm, cool)
+            if brightness > 0:
+                self._brightness_pct = brightness
+            if kelvin is not None:
+                self._color_temp_kelvin = kelvin
             self.async_write_ha_state()
         # Unblock any command that's waiting for this cmd id.
         if self._notify_waiter is not None:
@@ -480,9 +467,13 @@ class UlanziK6500Light(LightEntity):
     # ── LightEntity interface ─────────────────────────────────────────────────
 
     def _make_light_command(self, brightness_pct: int, kelvin: int) -> bytes:
-        """Build a 0x0001 command frame for the given brightness and color temp."""
-        warm, cool = _kelvin_to_warm_cool(kelvin)
-        payload = bytes([0x01, brightness_pct, warm, cool, 0x00])
+        """Build a 0x0001 command frame for the given brightness and color temp.
+
+        Color temperature is encoded as a big-endian 16-bit Kelvin value
+        in payload[2:3] — confirmed by Wireshark: 6500K=0x1964, 3400K=0x0D48.
+        """
+        k = max(MIN_COLOR_TEMP_K, min(MAX_COLOR_TEMP_K, kelvin))
+        payload = bytes([0x01, brightness_pct, (k >> 8) & 0xFF, k & 0xFF, 0x00])
         return _build_command(0x0001, payload)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
