@@ -15,7 +15,13 @@ from bleak_retry_connector import (
 )
 
 from homeassistant.components import bluetooth
-from homeassistant.components.light import ColorMode, LightEntity
+from homeassistant.components.light import (
+    ATTR_BRIGHTNESS,
+    ATTR_COLOR_TEMP,
+    ATTR_COLOR_TEMP_KELVIN,
+    ColorMode,
+    LightEntity,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_MAC, CONF_NAME
 from homeassistant.core import HomeAssistant
@@ -50,8 +56,19 @@ GATT_PREP_READ_HANDLES: tuple[int, ...] = (0x0013,)
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 COMMAND_LINK_PROBE_1 = bytes.fromhex("55 aa 03 06 00 01 01 a0 d8")
-COMMAND_ON           = bytes.fromhex("55 aa 03 01 00 05 01 28 19 64 00 10 fe")
-COMMAND_OFF          = bytes.fromhex("55 aa 03 01 00 05 01 00 19 64 00 19 5e")
+
+# Light command (cmd 0x0001) payload layout (5 bytes):
+#   [0] = 0x01 (mode flag, always 1)
+#   [1] = brightness 0-100  (0 = off)
+#   [2] = warm LED  0-100   (100 = max warm, 2900 K)
+#   [3] = cool LED  0-100   (100 = max cool, 6500 K)
+#   [4] = 0x00 (reserved)
+# Checksum: CRC-16/MODBUS over all bytes after "55 AA" header.
+
+DEFAULT_BRIGHTNESS_PCT  = 100   # used when turning on without a brightness kwarg
+DEFAULT_COLOR_TEMP_K    = 4000  # neutral white
+MIN_COLOR_TEMP_K        = 2900
+MAX_COLOR_TEMP_K        = 6500
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 
@@ -77,18 +94,58 @@ def _exception_chain_text(exc: BaseException) -> str:
     return " ".join(parts).lower()
 
 
-def _parse_notification(data: bytes) -> tuple[int, bool | None]:
-    """Return (cmd_id, on_state). state is None when packet has no ON/OFF info."""
+def _crc16_modbus(data: bytes) -> int:
+    """CRC-16/MODBUS: poly=0xA001, init=0xFFFF, reflected I/O."""
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return crc
+
+
+def _build_command(cmd: int, payload: bytes) -> bytes:
+    """Wrap payload in the 55-AA frame with CRC-16/MODBUS checksum."""
+    body = bytes([0x03, cmd & 0xFF, (cmd >> 8) & 0xFF, len(payload)]) + payload
+    crc = _crc16_modbus(body)
+    return b"\x55\xaa" + body + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
+
+
+def _kelvin_to_warm_cool(kelvin: int) -> tuple[int, int]:
+    """Convert color temperature to warm/cool LED mix (each 0-100, sum = 100)."""
+    t = max(0.0, min(1.0, (kelvin - MIN_COLOR_TEMP_K) / (MAX_COLOR_TEMP_K - MIN_COLOR_TEMP_K)))
+    warm = round((1.0 - t) * 100)
+    return warm, 100 - warm
+
+
+def _warm_cool_to_kelvin(warm: int, cool: int) -> int:
+    """Reverse of _kelvin_to_warm_cool."""
+    total = warm + cool
+    if total == 0:
+        return DEFAULT_COLOR_TEMP_K
+    t = cool / total
+    return round(MIN_COLOR_TEMP_K + t * (MAX_COLOR_TEMP_K - MIN_COLOR_TEMP_K))
+
+
+def _parse_notification(data: bytes) -> tuple[int, int | None, int | None, int | None]:
+    """Decode a notification frame.
+
+    Returns (cmd, brightness_pct, warm_pct, cool_pct).
+    Values are None when not present / not an ON/OFF command.
+    brightness_pct > 0 means ON; 0 means OFF.
+    """
     if len(data) < 8 or data[0] != 0x55 or data[1] != 0xAA or data[2] != 0x04:
-        return 0, None
+        return 0, None, None, None
     cmd = data[3] | (data[4] << 8)
     payload_len = data[5]
+    if cmd not in (0x0001, 0x0006):
+        return cmd, None, None, None
     if len(data) < 6 + payload_len + 2 or payload_len < 2:
-        return cmd, None
-    brightness = data[7]  # payload[1]: 0 = off, >0 = on
-    if cmd in (0x0001, 0x0006):
-        return cmd, brightness > 0
-    return cmd, None
+        return cmd, None, None, None
+    brightness = min(data[7], 100)          # payload[1]; clamp 0xFF → 100
+    warm = data[8] if payload_len >= 3 else None
+    cool = data[9] if payload_len >= 4 else None
+    return cmd, brightness, warm, cool
 
 
 # ── Platform setup ────────────────────────────────────────────────────────────
@@ -106,9 +163,11 @@ async def async_setup_entry(
 class UlanziK6500Light(LightEntity):
     """Ulanzi K6500 BLE monitor light — persistent connection."""
 
-    _attr_supported_color_modes = {ColorMode.ONOFF}
-    _attr_color_mode = ColorMode.ONOFF
+    _attr_supported_color_modes = {ColorMode.COLOR_TEMP}
+    _attr_color_mode = ColorMode.COLOR_TEMP
     _attr_should_poll = False
+    _attr_min_color_temp_kelvin = MIN_COLOR_TEMP_K
+    _attr_max_color_temp_kelvin = MAX_COLOR_TEMP_K
 
     def __init__(self, entry: ConfigEntry) -> None:
         self._entry = entry
@@ -117,6 +176,8 @@ class UlanziK6500Light(LightEntity):
         self._attr_name = name
         self._attr_unique_id = entry.unique_id
         self._state: bool | None = None
+        self._brightness_pct: int = DEFAULT_BRIGHTNESS_PCT   # 0-100
+        self._color_temp_kelvin: int = DEFAULT_COLOR_TEMP_K  # K
 
         self._attr_device_info = DeviceInfo(
             connections={(dr.CONNECTION_BLUETOOTH, dr.format_mac(self._mac))},
@@ -143,6 +204,15 @@ class UlanziK6500Light(LightEntity):
     @property
     def is_on(self) -> bool | None:
         return self._state
+
+    @property
+    def brightness(self) -> int:
+        """Return brightness in HA scale 0-255."""
+        return round(self._brightness_pct * 255 / 100)
+
+    @property
+    def color_temp_kelvin(self) -> int:
+        return self._color_temp_kelvin
 
     # ── HA lifecycle ──────────────────────────────────────────────────────────
 
@@ -276,15 +346,19 @@ class UlanziK6500Light(LightEntity):
     # ── Notification handler ──────────────────────────────────────────────────
 
     def _on_notify_persistent(self, handle: int, data: bytes) -> None:
-        cmd, state = _parse_notification(data)
-        if state is not None:
-            self._state = state
+        cmd, brightness, warm, cool = _parse_notification(data)
+        if brightness is not None:
+            self._state = brightness > 0
+            if self._state:
+                self._brightness_pct = brightness if brightness > 0 else self._brightness_pct
+            if warm is not None and cool is not None:
+                self._color_temp_kelvin = _warm_cool_to_kelvin(warm, cool)
             self.async_write_ha_state()
         # Unblock any command that's waiting for this cmd id.
         if self._notify_waiter is not None:
             cmd_filter, event, result = self._notify_waiter
-            if cmd in cmd_filter and state is not None:
-                result[0] = state
+            if cmd in cmd_filter and brightness is not None:
+                result[0] = brightness > 0
                 event.set()
 
     # ── GATT helpers ──────────────────────────────────────────────────────────
@@ -406,13 +480,36 @@ class UlanziK6500Light(LightEntity):
 
     # ── LightEntity interface ─────────────────────────────────────────────────
 
+    def _make_light_command(self, brightness_pct: int, kelvin: int) -> bytes:
+        """Build a 0x0001 command frame for the given brightness and color temp."""
+        warm, cool = _kelvin_to_warm_cool(kelvin)
+        payload = bytes([0x01, brightness_pct, warm, cool, 0x00])
+        return _build_command(0x0001, payload)
+
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self._send_command(COMMAND_ON, optimistic_state=True)
+        if ATTR_BRIGHTNESS in kwargs:
+            # HA provides 0-255; lamp uses 0-100
+            pct = round(kwargs[ATTR_BRIGHTNESS] * 100 / 255)
+            self._brightness_pct = max(1, pct)  # 0 would mean off
+        elif not self._state:
+            # Restoring from off — keep last brightness, default if never set
+            if self._brightness_pct == 0:
+                self._brightness_pct = DEFAULT_BRIGHTNESS_PCT
+
+        if ATTR_COLOR_TEMP_KELVIN in kwargs:
+            self._color_temp_kelvin = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
+        elif ATTR_COLOR_TEMP in kwargs:
+            # mireds → Kelvin (legacy HA attribute)
+            self._color_temp_kelvin = round(1_000_000 / kwargs[ATTR_COLOR_TEMP])
+
+        cmd = self._make_light_command(self._brightness_pct, self._color_temp_kelvin)
+        await self._send_command(cmd, optimistic_state=True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self._send_command(COMMAND_OFF, optimistic_state=False)
+        cmd = self._make_light_command(0, self._color_temp_kelvin)
+        await self._send_command(cmd, optimistic_state=False)
 
-    async def _send_command(self, payload: bytes, optimistic_state: bool) -> bool:
+    async def _send_command(self, command: bytes, optimistic_state: bool) -> bool:
         if not self._is_connected():
             _LOGGER.debug("Not connected to %s — attempting connect before command", self._mac)
             await self._async_try_connect()
@@ -433,7 +530,7 @@ class UlanziK6500Light(LightEntity):
             self._notify_waiter = (frozenset({0x0001}), event, result)
             try:
                 await client.write_gatt_char(GATT_WRITE_UUID, COMMAND_LINK_PROBE_1, response=False)
-                await client.write_gatt_char(GATT_WRITE_UUID, payload, response=False)
+                await client.write_gatt_char(GATT_WRITE_UUID, command, response=False)
                 try:
                     await asyncio.wait_for(event.wait(), timeout=NOTIFY_TIMEOUT)
                 except asyncio.TimeoutError:
