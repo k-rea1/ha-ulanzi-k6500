@@ -17,7 +17,6 @@ from bleak_retry_connector import (
 from homeassistant.components import bluetooth
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
-    ATTR_COLOR_TEMP,
     ATTR_COLOR_TEMP_KELVIN,
     ColorMode,
     LightEntity,
@@ -498,9 +497,6 @@ class UlanziK6500Light(LightEntity):
 
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
             self._color_temp_kelvin = int(kwargs[ATTR_COLOR_TEMP_KELVIN])
-        elif ATTR_COLOR_TEMP in kwargs:
-            # mireds → Kelvin (legacy HA attribute)
-            self._color_temp_kelvin = round(1_000_000 / kwargs[ATTR_COLOR_TEMP])
 
         cmd = self._make_light_command(self._brightness_pct, self._color_temp_kelvin)
         await self._send_command(cmd, optimistic_state=True)

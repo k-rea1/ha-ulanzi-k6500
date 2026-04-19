@@ -7,6 +7,8 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.typing import ConfigType
 
+from . import light as _light_platform  # noqa: F401 — pre-import to avoid blocking load
+
 PLATFORMS: list[Platform] = [Platform.LIGHT]
 
 
